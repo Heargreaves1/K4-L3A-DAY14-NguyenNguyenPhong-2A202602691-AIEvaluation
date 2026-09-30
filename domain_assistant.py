@@ -266,46 +266,66 @@ class OpenAIGenerator:
         return answer
 
 
-class GeminiGenerator:
-    """Gemini via its OpenAI-compatible Chat Completions endpoint.
+class ChatCompletionsGenerator:
+    """Any OpenAI-compatible Chat Completions endpoint (FPT Cloud, Gemini, ...).
 
-    Gemini does not implement the OpenAI Responses API, so this uses
+    These providers do not implement the OpenAI Responses API, so this uses
     ``chat.completions`` with the same prompt and temperature=0.
     """
 
-    BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-    def __init__(self, max_output_tokens: int = 2048) -> None:
-        api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.model = os.getenv("GEMINI_MODEL", "").strip()
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is missing from .env")
-        if not self.model:
-            raise RuntimeError("GEMINI_MODEL is missing from .env")
-        # Retries absorb transient 503 "high demand" errors from the endpoint.
-        self.client = OpenAI(api_key=api_key, base_url=self.BASE_URL, max_retries=5)
-        # Thinking models spend part of the budget on reasoning tokens, hence the
-        # larger limit than OpenAIGenerator; reasoning_effort keeps it small.
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int = 2048,
+    ) -> None:
+        if not api_key or not base_url or not model:
+            raise RuntimeError("API key, base URL and model are all required")
+        self.model = model
+        # Few retries + timeout so a rate-limited endpoint fails fast instead of hanging.
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=2, timeout=120)
+        self.reasoning_effort = reasoning_effort
+        # Reasoning models spend part of the budget on reasoning tokens, hence the
+        # larger limit than OpenAIGenerator.
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
+        extra: dict[str, Any] = {}
+        if self.reasoning_effort:
+            extra["reasoning_effort"] = self.reasoning_effort
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=self.max_output_tokens,
-            reasoning_effort="low",
+            **extra,
         )
         answer = (response.choices[0].message.content or "").strip()
         if not answer:
-            raise RuntimeError("Gemini returned an empty answer")
+            raise RuntimeError(f"{self.model} returned an empty answer")
         return answer
 
 
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
 def _default_generator() -> TextGenerator:
-    """Use Gemini when GEMINI_API_KEY is configured, otherwise OpenAI."""
+    """Pick the backend from .env: LLM_* (generic) > GEMINI_* > OPENAI_*."""
+    if os.getenv("LLM_API_KEY", "").strip():
+        return ChatCompletionsGenerator(
+            api_key=os.getenv("LLM_API_KEY", "").strip(),
+            base_url=os.getenv("LLM_BASE_URL", "").strip(),
+            model=os.getenv("LLM_MODEL", "").strip(),
+        )
     if os.getenv("GEMINI_API_KEY", "").strip():
-        return GeminiGenerator()
+        return ChatCompletionsGenerator(
+            api_key=os.getenv("GEMINI_API_KEY", "").strip(),
+            base_url=GEMINI_BASE_URL,
+            model=os.getenv("GEMINI_MODEL", "").strip(),
+            reasoning_effort="low",
+        )
     return OpenAIGenerator()
 
 
